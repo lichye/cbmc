@@ -121,7 +121,15 @@ protected:
   ///  * A `(get-value |identifier|)` command for each of the identifiers in
   ///    `smt2_convt::smt2_identifiers`.
   ///  * An `(exit)` command.
-  void write_footer();
+  void write_footer(bool get_model = true);
+  bool use_element_queries() const
+  {
+    return solver == solvert::BOOLECTOR || solver == solvert::BITWUZLA;
+  }
+  void register_model_identifier(const std::string &, const typet &);
+  std::map<std::string, array_typet> model_arrays;
+  static std::string model_element_id(const std::string &, std::size_t);
+  static std::size_t model_array_size(const array_typet &);
 
   // tweaks for arrays
   bool use_array_theory(const exprt &);

@@ -194,7 +194,35 @@ void smt2_convt::write_header()
     out << "(set-logic " << logic << ")" << "\n";
 }
 
-void smt2_convt::write_footer()
+void smt2_convt::register_model_identifier(
+  const std::string &name, const typet &type)
+{
+  if(use_element_queries() && type.id() == ID_array)
+    model_arrays.emplace(name, to_array_type(type));
+  else if(!use_element_queries() || type.id() != ID_mathematical_function)
+    smt2_identifiers.insert(name);
+}
+
+std::size_t smt2_convt::model_array_size(const array_typet &type)
+{
+  const auto size = numeric_cast<std::size_t>(type.size());
+  if(!size)
+    throw unsupported_operation_exceptiont(
+      "cannot enumerate model elements of an array without a finite size");
+  return *size;
+}
+
+std::string smt2_convt::model_element_id(
+  const std::string &array, std::size_t index)
+{
+  // With a space present, convert_identifier escapes a literal ampersand
+  // in a source name. This prefix is therefore private to the model queries.
+  const auto name = array.front() == '|' ? array.substr(1, array.size() - 2)
+                                         : array;
+  return "&model element " + name + " " + std::to_string(index);
+}
+
+void smt2_convt::write_footer(bool get_model)
 {
   out << "\n";
 
@@ -203,6 +231,28 @@ void smt2_convt::write_footer()
   // key)
   for(const auto &object : object_sizes)
     define_object_size(object.second, object.first);
+
+  if(get_model)
+  {
+    for(const auto &entry : model_arrays)
+    {
+      const auto &type = entry.second;
+      const auto size = model_array_size(type);
+      if(type.element_type().id() == ID_array)
+        throw unsupported_operation_exceptiont("nested SMT array model query");
+      for(std::size_t i = 0; i < size; ++i)
+      {
+        out << "(define-fun |" << model_element_id(entry.first, i) << "| () ";
+        if(type.element_type().id() == ID_bool && !use_array_of_bool)
+          out << "(_ BitVec 1)";
+        else
+          convert_type(type.element_type());
+        out << " (select " << entry.first << ' ';
+        convert_expr(from_integer(i, type.index_type()));
+        out << "))\n";
+      }
+    }
+  }
 
   if(use_check_sat_assuming && !assumptions.empty())
   {
@@ -232,7 +282,7 @@ void smt2_convt::write_footer()
 
   out << "\n";
 
-  if(solver!=solvert::BOOLECTOR)
+  if(get_model)
   {
     // Output get-value commands for all identifiers
     // Note: smt2_identifiers is std::set, so iteration is deterministic
@@ -240,6 +290,12 @@ void smt2_convt::write_footer()
     for(const auto &id : smt2_identifiers)
       out << "(get-value (" << id << "))"
           << "\n";
+    for(const auto &entry : model_arrays)
+    {
+      const auto size = model_array_size(entry.second);
+      for(std::size_t i = 0; i < size; ++i)
+        out << "(get-value (|" << model_element_id(entry.first, i) << "|))\n";
+    }
   }
 
   out << "\n";
@@ -791,9 +847,9 @@ exprt smt2_convt::parse_rec(const irept &src, const typet &type)
   }
   else if(type.id()==ID_bool)
   {
-    if(src.id()==ID_1 || src.id()==ID_true)
+    if(src.id() == ID_1 || src.id() == ID_true || src.id() == "#b1")
       return true_exprt();
-    else if(src.id()==ID_0 || src.id()==ID_false)
+    else if(src.id() == ID_0 || src.id() == ID_false || src.id() == "#b0")
       return false_exprt();
   }
   else if(type.id()==ID_pointer)
@@ -5470,7 +5526,7 @@ void smt2_convt::set_to(const exprt &expr, bool value)
         exprt prepared_rhs = prepare_for_convert_expr(equal_expr.rhs());
 
         std::string smt2_identifier=convert_identifier(identifier);
-        smt2_identifiers.insert(smt2_identifier);
+        register_model_identifier(smt2_identifier, equal_expr.lhs().type());
 
         out << "; set_to true (equal)\n";
 
@@ -5741,7 +5797,7 @@ void smt2_convt::find_symbols(const exprt &expr)
     if(id_entry.second)
     {
       std::string smt2_identifier=convert_identifier(identifier);
-      smt2_identifiers.insert(smt2_identifier);
+      register_model_identifier(smt2_identifier, expr.type());
 
       out << "; find_symbols\n";
       out << "(declare-fun " << smt2_identifier;

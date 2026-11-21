@@ -646,3 +646,40 @@ TEST_CASE(
       std::string::npos);
   }
 }
+
+class model_smt2_dect : public smt2_dect
+{
+public:
+  using smt2_dect::smt2_dect;
+  using smt2_dect::read_result;
+};
+
+TEST_CASE("SMT scalar and array element model replies", "[core][solvers][smt2]")
+{
+  symbol_tablet symbols;
+  namespacet ns{symbols};
+  null_message_handlert messages;
+  model_smt2_dect solver(
+    ns, "unit", "", "QF_AUFBV", smt2_convt::solvert::BITWUZLA, "", messages);
+  const unsignedbv_typet bit{1};
+  const auto zero = from_integer(0, bit);
+  const symbol_exprt a{"a", array_typet{bit, from_integer(2, unsignedbv_typet{8})}};
+  const auto handle = solver.handle(equal_exprt{index_exprt{a, zero}, zero});
+  const std::string prefix = "sat\n((B0 #b0))\n((|&model element a 0| #b1))\n";
+  using resultt = decision_proceduret::resultt;
+  SECTION("the Boolean handle and a one-bit word keep their types")
+  {
+    std::istringstream reply(prefix + "((|&model element a 1| #b0))\n");
+    REQUIRE(solver.read_result(reply) == resultt::D_SATISFIABLE);
+    REQUIRE(solver.get(handle).is_false());
+    const auto value = solver.get(a);
+    REQUIRE(value.operands().size() == 2);
+    REQUIRE(value.operands()[0] == from_integer(1, bit));
+    REQUIRE(value.operands()[1] == zero);
+  }
+  SECTION("a truncated element reply is an error")
+  {
+    std::istringstream reply(prefix);
+    REQUIRE(solver.read_result(reply) == resultt::D_ERROR);
+  }
+}

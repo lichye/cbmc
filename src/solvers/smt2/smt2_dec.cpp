@@ -41,24 +41,17 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     temp_file_stdout("smt2_dec_stdout_", ""),
     temp_file_stderr("smt2_dec_stderr_", "");
 
-  const auto write_problem_to_file = [&](std::ofstream problem_out) {
-    if(assumption.is_not_nil())
-      assumptions.push_back(convert(assumption));
+  if(assumption.is_not_nil())
+    assumptions.push_back(convert(assumption));
+  cached_output << stringstream.str();
+  stringstream.str({});
 
-    cached_output << stringstream.str();
-    stringstream.str(std::string{});
-
-    write_footer();
-
-    if(assumption.is_not_nil())
-      assumptions.pop_back();
-
+  const auto write_problem = [&](bool get_model) {
+    write_footer(get_model);
+    std::ofstream problem_out(temp_file_problem());
     problem_out << cached_output.str() << stringstream.str();
-    stringstream.str(std::string{});
+    stringstream.str({});
   };
-
-  write_problem_to_file(std::ofstream(
-    temp_file_problem(), std::ios_base::out | std::ios_base::trunc));
 
   std::vector<std::string> argv;
   std::string stdin_filename;
@@ -78,8 +71,7 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     break;
 
   case solvert::BOOLECTOR:
-    argv = {
-      solver_binary_name("boolector"), "--smt2", temp_file_problem(), "-m"};
+    argv = {solver_binary_name("boolector"), "--smt2", temp_file_problem()};
     break;
 
   case solvert::CPROVER_SMT2:
@@ -132,18 +124,60 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     break;
   }
 
-  int res =
-    run(argv[0], argv, stdin_filename, temp_file_stdout(), temp_file_stderr());
+  auto solve = [&](bool get_model) {
+    write_problem(get_model);
+    const int status = run(
+      argv[0], argv, stdin_filename, temp_file_stdout(), temp_file_stderr());
+    std::ifstream in(temp_file_stdout());
+    if(use_element_queries())
+    {
+      // BTOR frontends return 10/20. A solver can print a verdict and
+      // subsequently fail (e.g. while printing a model).
+      std::string verdict;
+      std::getline(in, verdict);
+      if(status == 20 && verdict == "unsat")
+        return resultt::D_UNSATISFIABLE;
+      if(status == 10 && verdict == "sat")
+      {
+        if(!get_model)
+          return resultt::D_SATISFIABLE;
+        in.clear();
+        in.seekg(0);
+        return read_result(in);
+      }
+      std::string diagnostic;
+      std::getline(std::ifstream{temp_file_stderr()}, diagnostic);
+      messaget{message_handler}.error()
+        << argv[0] << " returned status " << status << " (" << verdict << ") "
+        << diagnostic << messaget::eom;
+      return resultt::D_ERROR;
+    }
+    if(status < 0)
+    {
+      messaget{message_handler}.error() << "error running SMT2 solver"
+                                       << messaget::eom;
+      return resultt::D_ERROR;
+    }
+    return read_result(in);
+  };
 
-  if(res<0)
+  // Query values only on SAT. Some SMT-LIB frontends reject get-value
+  // after UNSAT, and finite memories can have many model elements.
+  auto result = solve(!use_element_queries());
+  if(use_element_queries() && result == resultt::D_SATISFIABLE)
   {
-    messaget log{message_handler};
-    log.error() << "error running SMT2 solver" << messaget::eom;
-    return decision_proceduret::resultt::D_ERROR;
+    result = solve(true);
+    if(result == resultt::D_UNSATISFIABLE)
+    {
+      messaget{message_handler}.error()
+        << "SMT2 solver returned inconsistent results during model extraction"
+        << messaget::eom;
+      result = resultt::D_ERROR;
+    }
   }
-
-  std::ifstream in(temp_file_stdout());
-  return read_result(in);
+  if(assumption.is_not_nil())
+    assumptions.pop_back();
+  return result;
 }
 
 static std::string drop_quotes(std::string src)
@@ -224,9 +258,50 @@ decision_proceduret::resultt smt2_dect::read_result(std::istream &in)
 
   for(auto &assignment : identifier_map)
   {
-    std::string conv_id = drop_quotes(convert_identifier(assignment.first));
-    const irept &value = parsed_values[conv_id];
-    assignment.second.value = parse_rec(value, assignment.second.type);
+    const auto id = convert_identifier(assignment.first);
+    const auto &type = assignment.second.type;
+    if(!use_element_queries())
+    {
+      assignment.second.value = parse_rec(parsed_values[drop_quotes(id)], type);
+      continue;
+    }
+    auto read_value = [&](const std::string &name, const typet &expected) {
+      auto it = parsed_values.find(name);
+      if(it == parsed_values.end())
+        return exprt{nil_exprt{}};
+      return parse_rec(it->second, expected);
+    };
+
+    if(type.id() == ID_array)
+    {
+      const auto &array_type = to_array_type(type);
+      const auto size = model_array_size(array_type);
+      exprt::operandst cells;
+      cells.reserve(size);
+      for(std::size_t i = 0; i < size; ++i)
+      {
+        auto cell = read_value(model_element_id(id, i), array_type.element_type());
+        if(cell.is_nil())
+        {
+          messaget{message_handler}.error()
+            << "missing SMT2 model element " << id << '[' << i << ']'
+            << messaget::eom;
+          return resultt::D_ERROR;
+        }
+        cells.push_back(std::move(cell));
+      }
+      assignment.second.value = array_exprt{std::move(cells), array_type};
+    }
+    else
+    {
+      assignment.second.value = read_value(drop_quotes(id), type);
+      if(smt2_identifiers.count(id) && assignment.second.value.is_nil())
+      {
+        messaget{message_handler}.error()
+          << "missing or invalid SMT2 model value for " << id << messaget::eom;
+        return resultt::D_ERROR;
+      }
+    }
   }
 
   // Booleans
@@ -240,14 +315,15 @@ decision_proceduret::resultt smt2_dect::read_result(std::istream &in)
       {
         const irept &value = found_parsed_value->second;
 
-        if(value.id() != ID_true && value.id() != ID_false)
+        const auto decoded = parse_rec(value, bool_typet{});
+        if(decoded.is_nil())
         {
           messaget log{message_handler};
           log.error() << "SMT2 solver returned non-constant value for variable "
                       << boolean_identifier << messaget::eom;
           return decision_proceduret::resultt::D_ERROR;
         }
-        boolean_assignment[v] = value.id() == ID_true;
+        boolean_assignment[v] = decoded.is_true();
       }
       else
       {
@@ -257,20 +333,10 @@ decision_proceduret::resultt smt2_dect::read_result(std::istream &in)
           boolean_assignment[v] = found_set_value->second;
         else
         {
-          // Old code used the computation
-          // const irept &value=values["B"+std::to_string(v)];
-          // boolean_assignment[v]=(value.id()==ID_true);
-          const irept &value = parsed_values[boolean_identifier];
-
-          if(value.id() != ID_true && value.id() != ID_false)
-          {
-            messaget log{message_handler};
-            log.error()
-              << "SMT2 solver returned non-Boolean value for variable "
-              << boolean_identifier << messaget::eom;
-            return decision_proceduret::resultt::D_ERROR;
-          }
-          boolean_assignment[v] = value.id() == ID_true;
+          messaget{message_handler}.error()
+            << "missing SMT2 model value for Boolean " << boolean_identifier
+            << messaget::eom;
+          return resultt::D_ERROR;
         }
       }
   }
