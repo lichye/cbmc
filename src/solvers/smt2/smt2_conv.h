@@ -97,6 +97,8 @@ public:
 
 protected:
   const namespacet &ns;
+  std::ostringstream array_body;
+  std::ostream &destination;
   std::ostream &out;
   std::string benchmark, notes, logic;
   solvert solver;
@@ -111,7 +113,7 @@ protected:
 
   resultt dec_solve(const exprt &) override;
 
-  void write_header();
+  void write_header(std::ostream &) const;
   /// Writes the end of the SMT file to the `smt_convt::out` stream. These parts
   /// of the output may be changed when using multiple rounds of solving. They
   /// include the following parts of the output file -
@@ -121,7 +123,30 @@ protected:
   ///  * A `(get-value |identifier|)` command for each of the identifiers in
   ///    `smt2_convt::smt2_identifiers`.
   ///  * An `(exit)` command.
-  void write_footer(bool get_model = true);
+  void write_footer(bool get_model = true, bool exact_rows = true);
+  void write_array_prelude(std::ostream &) const;
+  struct row_sortt
+  {
+    std::size_t number, index_bits, leaf_bits, key_bits, samples;
+    array_typet type;
+    std::vector<std::size_t> rows;
+  };
+  std::map<std::string, row_sortt> row_sorts;
+  std::map<exprt, std::size_t> row_terms;
+  std::size_t row_count = 0;
+  std::string row_sort_key(const array_typet &) const;
+  row_sortt &register_row_sort(const array_typet &, std::size_t prefix_bits);
+  std::size_t register_row(const exprt &);
+  void convert_stored_element(const exprt &);
+  bool sample_rows = false;
+  std::size_t row_key_width(const row_sortt &) const;
+  void write_sample_row(std::ostream &, const row_sortt &, std::size_t) const;
+  void write_row_equalities();
+  void write_model_cells(
+    const std::string &name,
+    const std::string &array,
+    const array_typet &type,
+    bool declarations);
   bool use_element_queries() const
   {
     return solver == solvert::BOOLECTOR || solver == solvert::BITWUZLA;

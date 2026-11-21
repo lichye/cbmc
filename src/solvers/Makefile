@@ -191,6 +191,7 @@ SRC = $(BOOLEFORCE_SRC) \
       smt2/letify.cpp \
       smt2/smt2_conv.cpp \
       smt2/smt2_dec.cpp \
+      smt2/smt2_nested_arrays.cpp \
       smt2/smt2_format.cpp \
       smt2/smt2_parser.cpp \
       smt2/smt2_tokenizer.cpp \

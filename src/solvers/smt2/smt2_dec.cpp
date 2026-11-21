@@ -43,14 +43,32 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
 
   if(assumption.is_not_nil())
     assumptions.push_back(convert(assumption));
-  cached_output << stringstream.str();
-  stringstream.str({});
-
-  const auto write_problem = [&](bool get_model) {
-    write_footer(get_model);
-    std::ofstream problem_out(temp_file_problem());
-    problem_out << cached_output.str() << stringstream.str();
+  if(use_element_queries())
+  {
+    cached_output << array_body.str();
+    array_body.str({});
+  }
+  else
+  {
+    cached_output << stringstream.str();
     stringstream.str({});
+  }
+
+  const auto write_problem = [&](bool get_model, bool exact_rows) {
+    write_footer(get_model, exact_rows);
+    std::ofstream problem_out(temp_file_problem());
+    if(use_element_queries())
+    {
+      write_header(problem_out);
+      write_array_prelude(problem_out);
+      problem_out << cached_output.str() << array_body.str();
+      array_body.str({});
+    }
+    else
+    {
+      problem_out << cached_output.str() << stringstream.str();
+      stringstream.str({});
+    }
   };
 
   std::vector<std::string> argv;
@@ -124,8 +142,8 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     break;
   }
 
-  auto solve = [&](bool get_model) {
-    write_problem(get_model);
+  auto solve = [&](bool get_model, bool exact_rows) {
+    write_problem(get_model, exact_rows);
     const int status = run(
       argv[0], argv, stdin_filename, temp_file_stdout(), temp_file_stderr());
     std::ifstream in(temp_file_stdout());
@@ -163,10 +181,23 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
 
   // Query values only on SAT. Some SMT-LIB frontends reject get-value
   // after UNSAT, and finite memories can have many model elements.
-  auto result = solve(!use_element_queries());
+  auto result = solve(!use_element_queries(), false);
+  // Omitting row consistency is a relaxation: UNSAT is final, SAT requires
+  // the exact encoding. Avoid constructing pairwise constraints for a cone
+  // whose property is already decided without any row observations.
+  if(!row_terms.empty() && result == resultt::D_SATISFIABLE)
+  {
+    sample_rows = true;
+    result = solve(false, true);
+    if(result == resultt::D_UNSATISFIABLE)
+    {
+      sample_rows = false;
+      result = solve(false, true);
+    }
+  }
   if(use_element_queries() && result == resultt::D_SATISFIABLE)
   {
-    result = solve(true);
+    result = solve(true, true);
     if(result == resultt::D_UNSATISFIABLE)
     {
       messaget{message_handler}.error()
@@ -175,6 +206,7 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
       result = resultt::D_ERROR;
     }
   }
+  sample_rows = false;
   if(assumption.is_not_nil())
     assumptions.pop_back();
   return result;
@@ -274,23 +306,31 @@ decision_proceduret::resultt smt2_dect::read_result(std::istream &in)
 
     if(type.id() == ID_array)
     {
-      const auto &array_type = to_array_type(type);
-      const auto size = model_array_size(array_type);
-      exprt::operandst cells;
-      cells.reserve(size);
-      for(std::size_t i = 0; i < size; ++i)
-      {
-        auto cell = read_value(model_element_id(id, i), array_type.element_type());
-        if(cell.is_nil())
+      const auto read_array = [&](const auto &self, const std::string &name,
+                                  const array_typet &array_type) -> exprt {
+        const auto size = model_array_size(array_type);
+        const auto &element = array_type.element_type();
+        exprt::operandst cells;
+        cells.reserve(size);
+        for(std::size_t i = 0; i < size; ++i)
         {
-          messaget{message_handler}.error()
-            << "missing SMT2 model element " << id << '[' << i << ']'
-            << messaget::eom;
-          return resultt::D_ERROR;
+          const auto cell_id = model_element_id(name, i);
+          auto cell = element.id() == ID_array
+                        ? self(self, cell_id, to_array_type(element))
+                        : read_value(cell_id, element);
+          if(cell.is_nil())
+          {
+            messaget{message_handler}.error()
+              << "missing SMT2 model element " << cell_id << messaget::eom;
+            return nil_exprt{};
+          }
+          cells.push_back(std::move(cell));
         }
-        cells.push_back(std::move(cell));
-      }
-      assignment.second.value = array_exprt{std::move(cells), array_type};
+        return array_exprt{std::move(cells), array_type};
+      };
+      assignment.second.value = read_array(read_array, id, to_array_type(type));
+      if(assignment.second.value.is_nil())
+        return resultt::D_ERROR;
     }
     else
     {

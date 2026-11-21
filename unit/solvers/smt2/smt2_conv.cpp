@@ -683,3 +683,50 @@ TEST_CASE("SMT scalar and array element model replies", "[core][solvers][smt2]")
     REQUIRE(solver.read_result(reply) == resultt::D_ERROR);
   }
 }
+
+TEST_CASE("BTOR nested array extensionality and models", "[.][solvers][smt2][btor]")
+{
+  symbol_tablet symbols;
+  namespacet ns{symbols};
+  null_message_handlert messages;
+  const unsignedbv_typet index_type{4}, word{2};
+  const auto zero = from_integer(0, index_type);
+  const auto one = from_integer(1, index_type);
+  array_typet row{word, from_integer(2, index_type)};
+  row.index_type_nonconst() = index_type;
+  array_typet matrix{row, from_integer(2, index_type)};
+  matrix.index_type_nonconst() = index_type;
+  symbol_exprt a{"matrix", matrix}, b{"row", row};
+  const index_exprt a0{a, zero};
+  const auto backend = GENERATE(smt2_convt::solvert::BOOLECTOR, smt2_convt::solvert::BITWUZLA);
+  {
+    smt2_dect solver(ns, "unit", "", "QF_AUFBV", backend, "", messages);
+    using resultt = decision_proceduret::resultt;
+    SECTION("equal rows are interchangeable in a whole-array update")
+    {
+      solver << equal_exprt{a0, b};
+      solver << notequal_exprt{with_exprt{a, zero, b}, a};
+      REQUIRE(solver() == resultt::D_UNSATISFIABLE);
+    }
+    SECTION("reconstruct the two coordinates without transposition")
+    {
+      const auto high = from_integer(3, word);
+      const auto low = from_integer(0, word);
+      solver << equal_exprt{index_exprt{a0, one}, high};
+      solver << equal_exprt{index_exprt{index_exprt{a, one}, zero}, low};
+      REQUIRE(solver() == resultt::D_SATISFIABLE);
+      const auto value = solver.get(a);
+      REQUIRE(value.operands().size() == 2);
+      REQUIRE(value.operands()[0].operands().at(1) == high);
+      REQUIRE(value.operands()[1].operands().at(0) == low);
+    }
+    SECTION("an unguarded SMT read beyond the declared row retains its value")
+    {
+      // CBMC's SMT array index is a full bit-vector. A finite-row witness
+      // cannot meet this constraint; the unrestricted encoding must retry.
+      const auto far = from_integer(12, index_type);
+      solver << notequal_exprt{index_exprt{a0, far}, from_integer(0, word)};
+      REQUIRE(solver() == resultt::D_SATISFIABLE);
+    }
+  }
+}

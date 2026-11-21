@@ -67,7 +67,10 @@ smt2_convt::smt2_convt(
   solvert _solver,
   std::ostream &_out)
   : ns(_ns),
-    out(_out),
+    destination(_out),
+    out(_solver == solvert::BOOLECTOR || _solver == solvert::BITWUZLA
+          ? static_cast<std::ostream &>(array_body)
+          : _out),
     benchmark(_benchmark),
     notes(_notes),
     logic(_logic),
@@ -94,6 +97,7 @@ smt2_convt::smt2_convt(
     break;
 
   case solvert::BOOLECTOR:
+    use_as_const = true;
     break;
 
   case solvert::CPROVER_SMT2:
@@ -133,7 +137,8 @@ smt2_convt::smt2_convt(
     break;
   }
 
-  write_header();
+  if(!use_element_queries())
+    write_header(out);
 }
 
 std::string smt2_convt::decision_procedure_text() const
@@ -164,7 +169,7 @@ tvt smt2_convt::l_get(literalt l) const
   return tvt(boolean_assignment[l.var_no()]^l.sign());
 }
 
-void smt2_convt::write_header()
+void smt2_convt::write_header(std::ostream &out) const
 {
   out << "; SMT 2" << "\n";
 
@@ -222,7 +227,7 @@ std::string smt2_convt::model_element_id(
   return "&model element " + name + " " + std::to_string(index);
 }
 
-void smt2_convt::write_footer(bool get_model)
+void smt2_convt::write_footer(bool get_model, bool exact_rows)
 {
   out << "\n";
 
@@ -232,27 +237,20 @@ void smt2_convt::write_footer(bool get_model)
   for(const auto &object : object_sizes)
     define_object_size(object.second, object.first);
 
+  const auto original_count = row_count;
   if(get_model)
-  {
     for(const auto &entry : model_arrays)
-    {
-      const auto &type = entry.second;
-      const auto size = model_array_size(type);
-      if(type.element_type().id() == ID_array)
-        throw unsupported_operation_exceptiont("nested SMT array model query");
-      for(std::size_t i = 0; i < size; ++i)
-      {
-        out << "(define-fun |" << model_element_id(entry.first, i) << "| () ";
-        if(type.element_type().id() == ID_bool && !use_array_of_bool)
-          out << "(_ BitVec 1)";
-        else
-          convert_type(type.element_type());
-        out << " (select " << entry.first << ' ';
-        convert_expr(from_integer(i, type.index_type()));
-        out << "))\n";
-      }
-    }
+      write_model_cells(entry.first, entry.first, entry.second, true);
+  if(exact_rows)
+    write_row_equalities();
+  // Model observations are local to this solve; retain only formula rows.
+  for(auto &entry : row_sorts)
+  {
+    auto &rows = entry.second.rows;
+    while(!rows.empty() && rows.back() >= original_count)
+      rows.pop_back();
   }
+  row_count = original_count;
 
   if(use_check_sat_assuming && !assumptions.empty())
   {
@@ -291,11 +289,7 @@ void smt2_convt::write_footer(bool get_model)
       out << "(get-value (" << id << "))"
           << "\n";
     for(const auto &entry : model_arrays)
-    {
-      const auto size = model_array_size(entry.second);
-      for(std::size_t i = 0; i < size; ++i)
-        out << "(get-value (|" << model_element_id(entry.first, i) << "|))\n";
-    }
+      write_model_cells(entry.first, entry.first, entry.second, false);
   }
 
   out << "\n";
@@ -353,7 +347,15 @@ decision_proceduret::resultt smt2_convt::dec_solve(const exprt &assumption)
     assumptions.pop_back();
   }
 
-  out.flush();
+  if(use_element_queries())
+  {
+    write_header(destination);
+    write_array_prelude(destination);
+    destination << array_body.str();
+    destination.flush();
+  }
+  else
+    out.flush();
   return decision_proceduret::resultt::D_ERROR;
 }
 
@@ -1820,7 +1822,14 @@ void smt2_convt::convert_expr(const exprt &expr)
       out << "((as const ";
       convert_type(array_of_expr.type());
       out << ") ";
-      convert_expr(array_of_expr.what());
+      if(array_of_expr.what().is_boolean() && !use_array_of_bool)
+      {
+        out << "(ite ";
+        convert_expr(array_of_expr.what());
+        out << " #b1 #b0)";
+      }
+      else
+        convert_stored_element(array_of_expr.what());
       out << ")";
     }
     else
@@ -3841,6 +3850,8 @@ void smt2_convt::flatten_array(const exprt &expr)
   mp_integer size = numeric_cast_v<mp_integer>(to_constant_expr(size_expr));
   CHECK_RETURN_WITH_DIAGNOSTICS(size != 0, "can't convert zero-sized array");
 
+  if(use_element_queries() && array_type.element_type().id() == ID_array)
+    throw unsupported_operation_exceptiont("bit cast of a nested SMT array");
   out << "(let ((?far ";
   convert_expr(expr);
   out << ")) ";
@@ -4880,7 +4891,14 @@ void smt2_convt::convert_with(const with_exprt &expr)
       out << " ";
       convert_expr(typecast_exprt(expr.where(), array_type.index_type()));
       out << " ";
-      convert_expr(expr.new_value());
+      if(use_element_queries() && expr.new_value().is_boolean() && !use_array_of_bool)
+      {
+        out << "(ite ";
+        convert_expr(expr.new_value());
+        out << " #b1 #b0)";
+      }
+      else
+        convert_stored_element(expr.new_value());
       out << ")";
     }
     else
@@ -5085,6 +5103,12 @@ void smt2_convt::convert_index(const index_exprt &expr)
 {
   const typet &array_op_type = expr.array().type();
 
+  if(use_element_queries() && expr.type().id() == ID_array &&
+     array_op_type.id() == ID_array && use_array_theory(expr.array()))
+  {
+    out << "|&row value " << row_terms.at(expr) << '|';
+    return;
+  }
   if(array_op_type.id()==ID_array)
   {
     const array_typet &array_type=to_array_type(array_op_type);
@@ -5345,6 +5369,8 @@ void smt2_convt::unflatten(
   }
   else if(type.id() == ID_array)
   {
+    if(use_element_queries() && to_array_type(type).element_type().id() == ID_array)
+      throw unsupported_operation_exceptiont("bit cast to a nested SMT array");
     PRECONDITION(use_as_const || use_lambda_for_array);
 
     if(where == wheret::BEGIN)
@@ -5740,6 +5766,17 @@ void smt2_convt::find_symbols(const exprt &expr)
   if(is_zero_width(expr.type(), ns))
     return;
 
+  // A ground row may be named at SMT top level; a row that depends on a
+  // locally bound variable cannot be lifted out of that scope.
+  if(use_element_queries() &&
+     (expr.id() == ID_forall || expr.id() == ID_exists || expr.id() == ID_let ||
+      expr.id() == ID_array_comprehension || expr.id() == ID_lambda) &&
+     has_subexpr(expr, [](const exprt &sub) {
+       return sub.type().id() == ID_array &&
+              to_array_type(sub.type()).element_type().id() == ID_array;
+     }))
+    throw unsupported_operation_exceptiont("nested SMT array under a binder");
+
   // recursive call on type
   find_symbols(expr.type());
 
@@ -5775,6 +5812,23 @@ void smt2_convt::find_symbols(const exprt &expr)
   // recursive call on operands
   for(const auto &op : expr.operands())
     find_symbols(op);
+
+  if(use_element_queries())
+  {
+    if(expr.id() == ID_index && expr.type().id() == ID_array &&
+       to_index_expr(expr).array().type().id() == ID_array &&
+       use_array_theory(to_index_expr(expr).array()))
+      register_row(expr);
+    if(expr.id() == ID_array || expr.id() == ID_array_of)
+    {
+      for(const auto &op : expr.operands())
+        if(op.type().id() == ID_array)
+          register_row(op);
+    }
+    if(expr.id() == ID_with && expr.type().id() == ID_array &&
+       to_with_expr(expr).new_value().type().id() == ID_array)
+      register_row(to_with_expr(expr).new_value());
+  }
 
   if(expr.id()==ID_symbol ||
      expr.id()==ID_nondet_symbol)
@@ -5875,7 +5929,7 @@ void smt2_convt::find_symbols(const exprt &expr)
           }
           else
           {
-            convert_expr(array_of.what());
+            convert_stored_element(array_of.what());
           }
           out << ")))\n";
         }
@@ -5959,7 +6013,7 @@ void smt2_convt::find_symbols(const exprt &expr)
           }
           else
           {
-            convert_expr(expr.operands()[i]);
+            convert_stored_element(expr.operands()[i]);
           }
           out << "))"
               << "\n"; // =, assert
@@ -6374,7 +6428,13 @@ void smt2_convt::convert_type(const typet &type)
     convert_type(array_type.index_type());
     out << " ";
 
-    if(subtype.id()==ID_bool && !use_array_of_bool)
+    if(use_element_queries() && subtype.id() == ID_array)
+    {
+      auto &sort = register_row_sort(
+        to_array_type(subtype), boolbv_width(array_type.index_type()));
+      out << "|&row sort " << sort.number << '|';
+    }
+    else if(subtype.id()==ID_bool && !use_array_of_bool)
       out << "(_ BitVec 1)";
     else
       convert_type(array_type.element_type());
