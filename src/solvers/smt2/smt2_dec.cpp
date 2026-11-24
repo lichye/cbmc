@@ -226,8 +226,8 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
          "closing the SMT2 problem file",
          [&] { file_operation([&] { problem_out.close(); }); }))
       return false;
-    clear_generated_text();
-    return true;
+    return checked_output(
+      "resetting the SMT2 footer buffer", clear_generated_text);
   };
 
   std::vector<std::string> argv;
