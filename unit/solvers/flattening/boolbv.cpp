@@ -52,6 +52,54 @@ SCENARIO("boolbvt", "[core][solvers][flattening][boolbvt]")
 }
 
 SCENARIO(
+  "boolbvt extracts only materialised reads of unbounded arrays",
+  "[core][solvers][flattening][boolbvt]")
+{
+  satcheckt satcheck{null_message_handler};
+  boolbvt boolbv{empty_namespace, satcheck, null_message_handler};
+  const unsignedbv_typet u8{8};
+  const array_typet type{u8, exprt{ID_infinity, bool_typet{}}};
+  const symbol_exprt base{"base", type};
+  const symbol_exprt result{"result", type};
+  const auto updated_value = from_integer(18, u8);
+  const auto retained_value = from_integer(52, u8);
+
+  boolbv << equal_exprt{result, with_exprt{base, false_exprt{}, updated_value}};
+  boolbv << equal_exprt{index_exprt{result, false_exprt{}}, updated_value};
+  boolbv << equal_exprt{index_exprt{result, true_exprt{}}, retained_value};
+
+  REQUIRE(boolbv() == decision_proceduret::resultt::D_SATISFIABLE);
+  const auto base_model = boolbv.get(base);
+  const auto result_model = boolbv.get(result);
+  REQUIRE(base_model.id() == ID_array_list);
+  REQUIRE(result_model.id() == ID_array_list);
+  const exprt::operandst base_cells{true_exprt{}, retained_value};
+  const exprt::operandst result_cells{
+    false_exprt{}, updated_value, true_exprt{}, retained_value};
+  CHECK(base_model.operands() == base_cells);
+  CHECK(result_model.operands() == result_cells);
+}
+
+SCENARIO(
+  "boolbvt extracts propositional reads of unbounded Boolean arrays",
+  "[core][solvers][flattening][boolbvt]")
+{
+  satcheckt satcheck{null_message_handler};
+  boolbvt boolbv{empty_namespace, satcheck, null_message_handler};
+  const array_typet type{bool_typet{}, exprt{ID_infinity, bool_typet{}}};
+  const symbol_exprt array{"array", type};
+  boolbv << index_exprt{array, false_exprt{}};
+  boolbv << not_exprt{index_exprt{array, true_exprt{}}};
+
+  REQUIRE(boolbv() == decision_proceduret::resultt::D_SATISFIABLE);
+  const auto model = boolbv.get(array);
+  REQUIRE(model.id() == ID_array_list);
+  const exprt::operandst cells{
+    false_exprt{}, true_exprt{}, true_exprt{}, false_exprt{}};
+  CHECK(model.operands() == cells);
+}
+
+SCENARIO(
   "boolbvt convert_let with a byte_update in an unbounded array value",
   "[core][solvers][flattening][boolbvt]")
 {
