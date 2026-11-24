@@ -300,14 +300,22 @@ exprt boolbvt::bv_get(const bvt &bv, const typet &type) const
 
 exprt boolbvt::bv_get_cache(const exprt &expr) const
 {
+  const auto bits = bv_cache.find(expr);
+  if(bits != bv_cache.end())
+  {
+    auto value = bv_get(bits->second, expr.type());
+    return value.is_nil() ? exprt(ID_unknown, expr.type()) : std::move(value);
+  }
+
+  // A Boolean array read can be converted directly to a propositional literal.
   if(expr.is_boolean())
-    return get(expr);
+  {
+    const auto literal = cache.find(expr);
+    if(literal != cache.end())
+      return bv_get({literal->second}, expr.type());
+  }
 
-  // look up literals in cache
-  bv_cachet::const_iterator it=bv_cache.find(expr);
-  CHECK_RETURN(it != bv_cache.end());
-
-  return bv_get(it->second, expr.type());
+  return nil_exprt{};
 }
 
 exprt boolbvt::bv_get_unbounded_array(const exprt &expr) const
@@ -320,10 +328,6 @@ exprt boolbvt::bv_get_unbounded_array(const exprt &expr) const
 
   // get the numeric value, unless it's infinity
   const auto size_opt = numeric_cast<mp_integer>(size);
-
-  // search array indices, and only use those applicable to a particular model
-  // (array theory may have seen other indices, which might only be live under a
-  // different model)
 
   typedef std::map<mp_integer, exprt> valuest;
   valuest values;
@@ -339,31 +343,30 @@ exprt boolbvt::bv_get_unbounded_array(const exprt &expr) const
     CHECK_RETURN(it != index_map.end());
     const index_sett &index_set=it->second;
 
-    for(index_sett::const_iterator it1=
-        index_set.begin();
-        it1!=index_set.end();
-        it1++)
+    for(const auto &index : index_set)
     {
-      index_exprt index(expr, *it1);
+      // The index set is shared by the whole array class. For instance, a
+      // write need not materialise a read of its base at the overwritten
+      // index. Only emit cells with a read in the solved formula.
+      auto value = bv_get_cache(index_exprt{expr, index});
+      if(value.is_nil())
+        continue;
 
-      exprt value=bv_get_cache(index);
-      exprt index_value=bv_get_cache(*it1);
+      const auto index_value = bv_get_cache(index);
+      auto index_mpint = numeric_cast<mp_integer>(index_value);
+      if(index_value.is_boolean() && index_value.is_constant())
+        index_mpint = index_value.is_true() ? 1 : 0;
+      if(
+        !index_mpint || *index_mpint < 0 ||
+        (size_opt && *index_mpint >= *size_opt))
+        continue;
 
-      if(!index_value.is_nil())
-      {
-        const auto index_mpint = numeric_cast<mp_integer>(index_value);
-
-        if(
-          index_mpint.has_value() && *index_mpint >= 0 &&
-          (!size_opt.has_value() || *index_mpint < *size_opt))
-        {
-          if(value.is_nil())
-            values[*index_mpint] =
-              exprt(ID_unknown, to_array_type(type).element_type());
-          else
-            values[*index_mpint] = value;
-        }
-      }
+      // Different index expressions can have the same value in this model.
+      // Keep an available value even if another read cannot be decoded.
+      if(value.id() == ID_unknown)
+        values.emplace(*index_mpint, std::move(value));
+      else
+        values.insert_or_assign(*index_mpint, std::move(value));
     }
   }
 
