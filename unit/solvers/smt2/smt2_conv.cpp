@@ -13,12 +13,17 @@
 #include <util/mathematical_types.h>
 #include <util/message.h>
 #include <util/namespace.h>
+#include <util/run.h>
 #include <util/std_expr.h>
 #include <util/symbol_table.h>
+#include <util/tempfile.h>
 
 #include <solvers/smt2/smt2_conv.h>
 #include <solvers/smt2/smt2_dec.h>
 #include <testing-utils/use_catch.h>
+
+#include <filesystem>
+#include <fstream>
 
 TEST_CASE(
   "smt2_convt::convert_identifier character escaping.",
@@ -652,7 +657,86 @@ class model_smt2_dect : public smt2_dect
 public:
   using smt2_dect::smt2_dect;
   using smt2_dect::read_result;
+
+  void fail_query_output(bool cache)
+  {
+    auto &stream = cache ? cached_output : out;
+    stream << "(assert (= |incomplete";
+    stream.setstate(std::ios::badbit);
+  }
+
+  void clear_query_stream_errors()
+  {
+    out.clear();
+    cached_output.clear();
+  }
 };
+
+#ifndef _WIN32
+TEST_CASE(
+  "Failed SMT2 query output prevents solver start",
+  "[core][solvers][smt2]")
+{
+  symbol_tablet symbols;
+  namespacet ns{symbols};
+  null_message_handlert messages;
+  temporary_filet script{"smt2-output-test-solver-", ""};
+  temporary_filet marker{"smt2-output-test-marker-", ""};
+  const bool element_queries = GENERATE(false, true);
+  const auto backend = element_queries ? smt2_convt::solvert::BITWUZLA
+                                       : smt2_convt::solvert::YICES;
+  const auto fault = GENERATE(std::string{"body"}, std::string{"cache"});
+  {
+    std::ofstream file(script());
+    file << "#!/bin/sh\n"
+         << "echo started >> " << shell_quote(marker()) << '\n'
+         << "echo unsat\nexit 20\n";
+    file.close();
+    REQUIRE(file.good());
+  }
+  std::filesystem::permissions(
+    script(),
+    std::filesystem::perms::owner_exec,
+    std::filesystem::perm_options::add);
+  model_smt2_dect solver(ns, "unit", "", "QF_BV", backend, script(), messages);
+  solver.fail_query_output(fault == "cache");
+  CHECK(solver() == decision_proceduret::resultt::D_ERROR);
+  solver.clear_query_stream_errors();
+  CHECK(solver() == decision_proceduret::resultt::D_ERROR);
+  CHECK(std::filesystem::file_size(marker()) == 0);
+}
+
+TEST_CASE(
+  "Failed SMT2 model query prevents a second solver start",
+  "[core][solvers][smt2]")
+{
+  symbol_tablet symbols;
+  namespacet ns{symbols};
+  null_message_handlert messages;
+  temporary_filet script{"smt2-model-test-solver-", ""};
+  temporary_filet marker{"smt2-model-test-marker-", ""};
+  {
+    std::ofstream file(script());
+    file << "#!/bin/sh\n"
+         << "echo started >> " << shell_quote(marker()) << '\n'
+         << "unlink \"$1\" && mkdir \"$1\" || exit 1\n"
+         << "echo sat\nexit 10\n";
+    file.close();
+    REQUIRE(file.good());
+  }
+  std::filesystem::permissions(
+    script(),
+    std::filesystem::perms::owner_exec,
+    std::filesystem::perm_options::add);
+  model_smt2_dect solver(
+    ns, "unit", "", "QF_BV", smt2_convt::solvert::BITWUZLA, script(), messages);
+  CHECK(solver() == decision_proceduret::resultt::D_ERROR);
+  solver.clear_query_stream_errors();
+  CHECK(solver() == decision_proceduret::resultt::D_ERROR);
+  CHECK(
+    std::filesystem::file_size(marker()) == std::string{"started\n"}.size());
+}
+#endif
 
 TEST_CASE("SMT scalar and array element model replies", "[core][solvers][smt2]")
 {

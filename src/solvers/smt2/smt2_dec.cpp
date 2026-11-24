@@ -8,6 +8,7 @@ Author: Daniel Kroening, kroening@kroening.com
 
 #include "smt2_dec.h"
 
+#include <util/exception_utils.h>
 #include <util/invariant.h>
 #include <util/message.h>
 #include <util/run.h>
@@ -15,7 +16,28 @@ Author: Daniel Kroening, kroening@kroening.com
 
 #include "smt2irep.h"
 
+#include <array>
+#include <cerrno>
 #include <fstream>
+#include <new>
+#include <optional>
+#include <stdexcept>
+#include <system_error>
+
+namespace
+{
+struct smt2_stream_failuret
+{
+  std::ios::iostate state;
+  int file_error;
+};
+
+void check_smt2_stream(const std::ios &stream, int file_error = 0)
+{
+  if(!stream.good())
+    throw smt2_stream_failuret{stream.rdstate(), file_error};
+}
+} // namespace
 
 std::string smt2_dect::decision_procedure_text() const
 {
@@ -36,39 +58,176 @@ std::string smt2_dect::decision_procedure_text() const
 decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
 {
   ++number_of_solver_calls;
+  if(query_output_failed)
+    return resultt::D_ERROR;
 
-  temporary_filet temp_file_problem("smt2_dec_problem_", ""),
-    temp_file_stdout("smt2_dec_stdout_", ""),
-    temp_file_stderr("smt2_dec_stderr_", "");
-
-  if(assumption.is_not_nil())
-    assumptions.push_back(convert(assumption));
-  if(use_element_queries())
+  messaget log{message_handler};
+  const auto output_error = [&](const char *stage) -> messaget::mstreamt &
   {
-    cached_output << array_body.str();
-    array_body.str({});
-  }
-  else
+    query_output_failed = true;
+    return log.error() << "SMT2 query output failed while " << stage << ": ";
+  };
+  const auto checked_output = [&](const char *stage, const auto &operation)
   {
-    cached_output << stringstream.str();
-    stringstream.str({});
-  }
+    try
+    {
+      operation();
+      return true;
+    }
+    catch(const smt2_stream_failuret &failure)
+    {
+      auto &message = output_error(stage);
+      message << "stream set";
+      if(failure.state & std::ios::badbit)
+        message << " badbit";
+      if(failure.state & std::ios::failbit)
+        message << " failbit";
+      if(failure.state & std::ios::eofbit)
+        message << " eofbit";
+      if(failure.file_error)
+        message << " (" << failure.file_error << ": "
+                << std::error_code(failure.file_error, std::generic_category())
+                     .message()
+                << ')';
+      message << messaget::eom;
+    }
+    catch(const std::bad_alloc &)
+    {
+      output_error(stage) << "out of memory" << messaget::eom;
+    }
+    catch(const std::length_error &error)
+    {
+      output_error(stage) << error.what() << messaget::eom;
+    }
+    catch(const std::ios::failure &error)
+    {
+      output_error(stage) << error.what() << messaget::eom;
+    }
+    catch(const system_exceptiont &error)
+    {
+      output_error(stage) << error.what() << messaget::eom;
+    }
+    catch(...)
+    {
+      query_output_failed = true;
+      throw;
+    }
+    return false;
+  };
 
-  const auto write_problem = [&](bool get_model, bool exact_rows) {
-    write_footer(get_model, exact_rows);
-    std::ofstream problem_out(temp_file_problem());
+  const auto generated_text = [&]
+  { return use_element_queries() ? array_body.str() : stringstream.str(); };
+  const auto clear_generated_text = [&]
+  {
     if(use_element_queries())
-    {
-      write_header(problem_out);
-      write_array_prelude(problem_out);
-      problem_out << cached_output.str() << array_body.str();
       array_body.str({});
-    }
     else
-    {
-      problem_out << cached_output.str() << stringstream.str();
       stringstream.str({});
-    }
+  };
+  bool added_assumption = false;
+  const auto finish = [&](resultt result)
+  {
+    sample_rows = false;
+    if(added_assumption)
+      assumptions.pop_back();
+    return result;
+  };
+
+  if(
+    !checked_output(
+      "generating the SMT2 body",
+      [&]
+      {
+        check_smt2_stream(out);
+        if(assumption.is_not_nil())
+        {
+          assumptions.push_back(convert(assumption));
+          added_assumption = true;
+        }
+        check_smt2_stream(out);
+      }) ||
+    !checked_output(
+      "caching the SMT2 body",
+      [&]
+      {
+        check_smt2_stream(cached_output);
+        // Preserve an allocation exception from the string buffer instead of
+        // letting the insertion reduce it to a generic stream error.
+        cached_output.exceptions(std::ios::badbit);
+        cached_output << generated_text();
+        check_smt2_stream(cached_output);
+        clear_generated_text();
+      }))
+    return finish(resultt::D_ERROR);
+
+  std::optional<std::array<temporary_filet, 3>> files;
+  if(!checked_output(
+       "creating the SMT2 solver temporary files",
+       [&]
+       {
+         files.emplace(std::array<temporary_filet, 3>{
+           temporary_filet{"smt2_dec_problem_", ""},
+           temporary_filet{"smt2_dec_stdout_", ""},
+           temporary_filet{"smt2_dec_stderr_", ""}});
+       }))
+    return finish(resultt::D_ERROR);
+  const auto &[temp_file_problem, temp_file_stdout, temp_file_stderr] = *files;
+
+  const auto write_problem = [&](bool get_model, bool exact_rows)
+  {
+    if(!checked_output(
+         "generating the SMT2 footer",
+         [&]
+         {
+           check_smt2_stream(out);
+           write_footer(get_model, exact_rows);
+           check_smt2_stream(out);
+         }))
+      return false;
+
+    std::ofstream problem_out;
+    const auto file_operation = [&](const auto &operation)
+    {
+      errno = 0;
+      operation();
+      check_smt2_stream(problem_out, errno);
+    };
+    const auto write_text = [&](const std::string &text)
+    { file_operation([&] { problem_out << text; }); };
+    if(!checked_output(
+         "opening the SMT2 problem file",
+         [&]
+         {
+           const auto filename = temp_file_problem();
+           file_operation([&] { problem_out.open(filename); });
+         }))
+      return false;
+    if(
+      use_element_queries() &&
+      !checked_output(
+        "writing the SMT2 header and array prelude",
+        [&]
+        {
+          file_operation([&] { write_header(problem_out); });
+          file_operation([&] { write_array_prelude(problem_out); });
+        }))
+      return false;
+    if(!checked_output(
+         "writing the SMT2 body and footer",
+         [&]
+         {
+           check_smt2_stream(cached_output);
+           write_text(cached_output.str());
+           write_text(generated_text());
+           file_operation([&] { problem_out.flush(); });
+         }))
+      return false;
+    if(!checked_output(
+         "closing the SMT2 problem file",
+         [&] { file_operation([&] { problem_out.close(); }); }))
+      return false;
+    return checked_output(
+      "resetting the SMT2 footer buffer", clear_generated_text);
   };
 
   std::vector<std::string> argv;
@@ -142,8 +301,10 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     break;
   }
 
-  auto solve = [&](bool get_model, bool exact_rows) {
-    write_problem(get_model, exact_rows);
+  auto solve = [&](bool get_model, bool exact_rows)
+  {
+    if(!write_problem(get_model, exact_rows))
+      return resultt::D_ERROR;
     const int status = run(
       argv[0], argv, stdin_filename, temp_file_stdout(), temp_file_stderr());
     std::ifstream in(temp_file_stdout());
@@ -206,10 +367,7 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
       result = resultt::D_ERROR;
     }
   }
-  sample_rows = false;
-  if(assumption.is_not_nil())
-    assumptions.pop_back();
-  return result;
+  return finish(result);
 }
 
 static std::string drop_quotes(std::string src)
