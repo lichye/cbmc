@@ -51,6 +51,10 @@ protected:
   std::stringstream cached_output;
 
   resultt read_result(std::istream &in);
+
+private:
+  // Once output fails, the cached formula may lack part of an assertion.
+  bool query_output_failed = false;
 };
 
 #endif // CPROVER_SOLVERS_SMT2_SMT2_DEC_H
