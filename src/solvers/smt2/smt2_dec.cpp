@@ -67,7 +67,10 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     query_output_failed = true;
     return log.error() << "SMT2 query output failed while " << stage << ": ";
   };
-  const auto checked_output = [&](const char *stage, const auto &operation)
+  const auto checked_output = [&](
+                                const char *stage,
+                                const auto &operation,
+                                const char *allocation_diagnostic = nullptr)
   {
     try
     {
@@ -93,7 +96,13 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     }
     catch(const std::bad_alloc &)
     {
-      output_error(stage) << "out of memory" << messaget::eom;
+      if(allocation_diagnostic)
+      {
+        query_output_failed = true;
+        log.error() << allocation_diagnostic << messaget::eom;
+      }
+      else
+        output_error(stage) << "out of memory" << messaget::eom;
     }
     catch(const std::length_error &error)
     {
@@ -115,15 +124,13 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     return false;
   };
 
-  const auto generated_text = [&]
-  { return use_element_queries() ? array_body.str() : stringstream.str(); };
-  const auto clear_generated_text = [&]
+  auto &generated_output = use_element_queries() ? array_body : stringstream;
+  const auto check_body = [&]
   {
-    if(use_element_queries())
-      array_body.str({});
-    else
-      stringstream.str({});
+    generated_output.rethrow_allocation_failure();
+    check_smt2_stream(out);
   };
+  const auto clear_generated_text = [&] { generated_output.str({}); };
   bool added_assumption = false;
   const auto finish = [&](resultt result)
   {
@@ -138,14 +145,15 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
       "generating the SMT2 body",
       [&]
       {
-        check_smt2_stream(out);
+        check_body();
         if(assumption.is_not_nil())
         {
           assumptions.push_back(convert(assumption));
           added_assumption = true;
         }
-        check_smt2_stream(out);
-      }) ||
+        check_body();
+      },
+      "SMT2 query output failed: out of memory while generating SMT2 body") ||
     !checked_output(
       "caching the SMT2 body",
       [&]
@@ -154,7 +162,7 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
         // Preserve an allocation exception from the string buffer instead of
         // letting the insertion reduce it to a generic stream error.
         cached_output.exceptions(std::ios::badbit);
-        cached_output << generated_text();
+        cached_output << generated_output.str();
         check_smt2_stream(cached_output);
         clear_generated_text();
       }))
@@ -218,7 +226,7 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
          {
            check_smt2_stream(cached_output);
            write_text(cached_output.str());
-           write_text(generated_text());
+           write_text(generated_output.str());
            file_operation([&] { problem_out.flush(); });
          }))
       return false;

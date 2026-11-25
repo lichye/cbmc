@@ -20,10 +20,27 @@
 
 #include <solvers/smt2/smt2_conv.h>
 #include <solvers/smt2/smt2_dec.h>
+#include <solvers/smt2/smt2_output_stream.h>
 #include <testing-utils/use_catch.h>
 
 #include <filesystem>
 #include <fstream>
+
+TEST_CASE("SMT2 body stream keeps unclassified failures", "[core][solvers][smt2]")
+{
+  smt2_output_streamt out;
+  out << "(assert (= x " << 1 << "))\n";
+  CHECK(out.str() == "(assert (= x 1))\n");
+
+  out.setstate(std::ios::badbit);
+  CHECK(out.bad());
+  CHECK_NOTHROW(out.rethrow_allocation_failure());
+
+  out.clear();
+  out.str({});
+  out << "(check-sat)\n";
+  CHECK(out.str() == "(check-sat)\n");
+}
 
 TEST_CASE(
   "smt2_convt::convert_identifier character escaping.",
