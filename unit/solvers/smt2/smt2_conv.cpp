@@ -43,6 +43,27 @@ TEST_CASE("SMT2 body stream keeps unclassified failures", "[core][solvers][smt2]
 }
 
 TEST_CASE(
+  "SMT2 body stream can be replayed while growing",
+  "[core][solvers][smt2]")
+{
+  smt2_output_streamt body;
+  std::ostringstream first, second, third;
+  body.write_to(first);
+  CHECK(first.good());
+  CHECK(first.str().empty());
+
+  body << "(assert true)\n";
+  body.write_to(first);
+  body.write_to(second);
+  CHECK(first.str() == "(assert true)\n");
+  CHECK(second.str() == first.str());
+
+  body << "(assert false)\n";
+  body.write_to(third);
+  CHECK(third.str() == "(assert true)\n(assert false)\n");
+}
+
+TEST_CASE(
   "smt2_convt::convert_identifier character escaping.",
   "[core][solvers][smt2]")
 {
@@ -675,17 +696,15 @@ public:
   using smt2_dect::smt2_dect;
   using smt2_dect::read_result;
 
-  void fail_query_output(bool cache)
+  void fail_query_output()
   {
-    auto &stream = cache ? cached_output : out;
-    stream << "(assert (= |incomplete";
-    stream.setstate(std::ios::badbit);
+    out << "(assert (= |incomplete";
+    out.setstate(std::ios::badbit);
   }
 
   void clear_query_stream_errors()
   {
     out.clear();
-    cached_output.clear();
   }
 };
 
@@ -702,7 +721,6 @@ TEST_CASE(
   const bool element_queries = GENERATE(false, true);
   const auto backend = element_queries ? smt2_convt::solvert::BITWUZLA
                                        : smt2_convt::solvert::YICES;
-  const auto fault = GENERATE(std::string{"body"}, std::string{"cache"});
   {
     std::ofstream file(script());
     file << "#!/bin/sh\n"
@@ -716,7 +734,7 @@ TEST_CASE(
     std::filesystem::perms::owner_exec,
     std::filesystem::perm_options::add);
   model_smt2_dect solver(ns, "unit", "", "QF_BV", backend, script(), messages);
-  solver.fail_query_output(fault == "cache");
+  solver.fail_query_output();
   CHECK(solver() == decision_proceduret::resultt::D_ERROR);
   solver.clear_query_stream_errors();
   CHECK(solver() == decision_proceduret::resultt::D_ERROR);
