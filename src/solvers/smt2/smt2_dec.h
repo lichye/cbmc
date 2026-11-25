@@ -17,7 +17,7 @@ class message_handlert;
 class smt2_stringstreamt
 {
 protected:
-  std::stringstream stringstream;
+  smt2_output_streamt stringstream;
 };
 
 /*! \brief Decision procedure interface for various SMT 2.x solvers

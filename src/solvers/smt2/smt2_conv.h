@@ -29,6 +29,7 @@ Author: Daniel Kroening, kroening@kroening.com
 #include <solvers/stack_decision_procedure.h>
 
 #include "letify.h"
+#include "smt2_output_stream.h"
 
 class floatbv_fma_exprt;
 class floatbv_typecast_exprt;
@@ -97,7 +98,7 @@ public:
 
 protected:
   const namespacet &ns;
-  std::ostringstream array_body;
+  smt2_output_streamt array_body;
   std::ostream &destination;
   std::ostream &out;
   std::string benchmark, notes, logic;
