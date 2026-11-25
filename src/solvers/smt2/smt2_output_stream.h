@@ -31,6 +31,12 @@ public:
     buffer.str(value);
   }
 
+  /// Write the append-only output directly from its buffer.
+  void write_to(std::ostream &destination) const
+  {
+    buffer.write_to(destination);
+  }
+
   void rethrow_allocation_failure() const
   {
     if(buffer.allocation_failure)
@@ -45,6 +51,12 @@ private:
     }
 
     std::exception_ptr allocation_failure;
+
+    void write_to(std::ostream &destination) const
+    {
+      if(pptr() != pbase())
+        destination.write(pbase(), pptr() - pbase());
+    }
 
   protected:
     int_type overflow(int_type c) override

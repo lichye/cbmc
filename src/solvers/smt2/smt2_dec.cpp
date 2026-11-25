@@ -37,6 +37,28 @@ void check_smt2_stream(const std::ios &stream, int file_error = 0)
   if(!stream.good())
     throw smt2_stream_failuret{stream.rdstate(), file_error};
 }
+
+/// Keep the converter's stream and formatting while routing footer writes.
+class smt2_footer_outputt
+{
+public:
+  smt2_footer_outputt(std::ostream &out, std::streambuf &footer)
+    : out(out), body(out.rdbuf(&footer))
+  {
+  }
+
+  ~smt2_footer_outputt()
+  {
+    out.rdbuf(body);
+  }
+
+  smt2_footer_outputt(const smt2_footer_outputt &) = delete;
+  smt2_footer_outputt &operator=(const smt2_footer_outputt &) = delete;
+
+private:
+  std::ostream &out;
+  std::streambuf *const body;
+};
 } // namespace
 
 std::string smt2_dect::decision_procedure_text() const
@@ -124,13 +146,14 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     return false;
   };
 
-  auto &generated_output = use_element_queries() ? array_body : stringstream;
+  // Assertion and assumption conversion append to this body across solves.
+  const auto &generated_output =
+    use_element_queries() ? array_body : stringstream;
   const auto check_body = [&]
   {
     generated_output.rethrow_allocation_failure();
     check_smt2_stream(out);
   };
-  const auto clear_generated_text = [&] { generated_output.str({}); };
   bool added_assumption = false;
   const auto finish = [&](resultt result)
   {
@@ -140,32 +163,19 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
     return result;
   };
 
-  if(
-    !checked_output(
-      "generating the SMT2 body",
-      [&]
-      {
-        check_body();
-        if(assumption.is_not_nil())
-        {
-          assumptions.push_back(convert(assumption));
-          added_assumption = true;
-        }
-        check_body();
-      },
-      "SMT2 query output failed: out of memory while generating SMT2 body") ||
-    !checked_output(
-      "caching the SMT2 body",
-      [&]
-      {
-        check_smt2_stream(cached_output);
-        // Preserve an allocation exception from the string buffer instead of
-        // letting the insertion reduce it to a generic stream error.
-        cached_output.exceptions(std::ios::badbit);
-        cached_output << generated_output.str();
-        check_smt2_stream(cached_output);
-        clear_generated_text();
-      }))
+  if(!checked_output(
+       "generating the SMT2 body",
+       [&]
+       {
+         check_body();
+         if(assumption.is_not_nil())
+         {
+           assumptions.push_back(convert(assumption));
+           added_assumption = true;
+         }
+         check_body();
+       },
+       "SMT2 query output failed: out of memory while generating SMT2 body"))
     return finish(resultt::D_ERROR);
 
   std::optional<std::array<temporary_filet, 3>> files;
@@ -183,11 +193,14 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
 
   const auto write_problem = [&](bool get_model, bool exact_rows)
   {
+    std::optional<smt2_output_streamt> footer;
     if(!checked_output(
          "generating the SMT2 footer",
          [&]
          {
            check_smt2_stream(out);
+           footer.emplace();
+           const smt2_footer_outputt redirect(out, *footer->rdbuf());
            write_footer(get_model, exact_rows);
            check_smt2_stream(out);
          }))
@@ -200,8 +213,6 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
       operation();
       check_smt2_stream(problem_out, errno);
     };
-    const auto write_text = [&](const std::string &text)
-    { file_operation([&] { problem_out << text; }); };
     if(!checked_output(
          "opening the SMT2 problem file",
          [&]
@@ -220,22 +231,17 @@ decision_proceduret::resultt smt2_dect::dec_solve(const exprt &assumption)
           file_operation([&] { write_array_prelude(problem_out); });
         }))
       return false;
-    if(!checked_output(
-         "writing the SMT2 body and footer",
-         [&]
-         {
-           check_smt2_stream(cached_output);
-           write_text(cached_output.str());
-           write_text(generated_output.str());
-           file_operation([&] { problem_out.flush(); });
-         }))
-      return false;
-    if(!checked_output(
-         "closing the SMT2 problem file",
-         [&] { file_operation([&] { problem_out.close(); }); }))
-      return false;
     return checked_output(
-      "resetting the SMT2 footer buffer", clear_generated_text);
+             "writing the SMT2 body and footer",
+             [&]
+             {
+               file_operation([&] { generated_output.write_to(problem_out); });
+               file_operation([&] { footer->write_to(problem_out); });
+               file_operation([&] { problem_out.flush(); });
+             }) &&
+           checked_output(
+             "closing the SMT2 problem file",
+             [&] { file_operation([&] { problem_out.close(); }); });
   };
 
   std::vector<std::string> argv;
