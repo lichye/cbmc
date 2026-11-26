@@ -105,6 +105,7 @@ SRC += analyses/ai/ai.cpp \
        solvers/bdd/miniBDD/miniBDD.cpp \
        solvers/flattening/boolbv.cpp \
        solvers/flattening/boolbv_enumeration.cpp \
+       solvers/flattening/boolbv_index.cpp \
        solvers/flattening/boolbv_onehot.cpp \
        solvers/flattening/boolbv_update_bit.cpp \
        solvers/flattening/bv_utils.cpp \
