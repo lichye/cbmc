@@ -96,3 +96,38 @@ SCENARIO(
     }
   }
 }
+
+SCENARIO(
+  "boolbvt reads from a uniform array at a symbolic index",
+  "[core][solvers][flattening][boolbvt]")
+{
+  // Whether a read from an array of `size` elements that all equal 5 can
+  // differ from 5 when the symbolic index has the given value.
+  const unsignedbv_typet u8{8};
+  auto read_differs =
+    [&u8](std::size_t size, const typet &index_type, const mp_integer &value)
+  {
+    satcheckt satcheck{null_message_handler};
+    boolbvt boolbv{empty_namespace, satcheck, null_message_handler};
+    const array_exprt array{
+      exprt::operandst(size, from_integer(5, u8)),
+      array_typet{u8, from_integer(size, unsignedbv_typet{32})}};
+    const symbol_exprt index{"index", index_type};
+    boolbv << equal_exprt{index, from_integer(value, index_type)};
+    boolbv << notequal_exprt{index_exprt{array, index}, from_integer(5, u8)};
+    return boolbv() == decision_proceduret::resultt::D_SATISFIABLE;
+  };
+
+  GIVEN("Two equal elements and a one-bit index, which cannot hold the size")
+  {
+    REQUIRE_FALSE(read_differs(2, unsignedbv_typet{1}, 0));
+    REQUIRE_FALSE(read_differs(2, unsignedbv_typet{1}, 1));
+  }
+
+  GIVEN("A signed index type that cannot hold the size")
+  {
+    // The lower bound is kept: a negative index is out of bounds.
+    REQUIRE(read_differs(2, signedbv_typet{2}, -1));
+    REQUIRE_FALSE(read_differs(2, signedbv_typet{2}, 1));
+  }
+}
