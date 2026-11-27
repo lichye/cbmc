@@ -6,17 +6,18 @@ Author: Daniel Kroening, kroening@kroening.com
 
 \*******************************************************************/
 
-#include "boolbv.h"
-
-#include <algorithm>
-
 #include <util/arith_tools.h>
+#include <util/bitvector_types.h>
 #include <util/byte_operators.h>
 #include <util/cprover_prefix.h>
 #include <util/pointer_expr.h>
 #include <util/pointer_offset_size.h>
 #include <util/simplify_expr.h>
 #include <util/std_expr.h>
+
+#include "boolbv.h"
+
+#include <algorithm>
 
 bvt boolbvt::convert_index(const index_exprt &expr)
 {
@@ -135,8 +136,21 @@ bvt boolbvt::convert_index(const index_exprt &expr)
 
       binary_relation_exprt lower_bound(
         from_integer(0, index.type()), ID_le, index);
-      binary_relation_exprt upper_bound(
-        index, ID_lt, from_integer(array_size, index.type()));
+
+      // An array size above the largest value of the index type bounds every
+      // index of that type. The size itself cannot be represented in the index
+      // type: from_integer would wrap it around, e.g., a size of 2 to 0 for a
+      // one-bit index, and the range condition would never hold.
+      const bool size_above_index_type =
+        can_cast_type<integer_bitvector_typet>(index.type()) &&
+        array_size >= 0 &&
+        array_size > to_integer_bitvector_type(index.type()).largest();
+
+      exprt upper_bound =
+        size_above_index_type
+          ? exprt{true_exprt{}}
+          : exprt{binary_relation_exprt{
+              index, ID_lt, from_integer(array_size, index.type())}};
 
       and_exprt range_condition(std::move(lower_bound), std::move(upper_bound));
       implies_exprt implication(
